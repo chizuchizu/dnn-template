@@ -45,8 +45,7 @@ class BCEFocalLoss(torch.nn.Module):
         self.reduction = reduction
 
     def forward(self, _input, target):
-        # pt = torch.sigmoid(_input)
-        pt = _input
+        pt = torch.sigmoid(_input)
         loss = - (1 - pt) ** self.gamma * target * torch.log(pt) - \
                pt ** self.gamma * (1 - target) * torch.log(1 - pt)
         if self.alpha:
