@@ -54,16 +54,6 @@ train:
 
   train_folds: [ 0 ]
 
-
-
-
-  split:
-    type: "MultilabelStratifiedKFold"
-    params:
-      n_splits: 4
-      shuffle: True
-      random_state: 42
-
   optimizer:
     type: "Adam"
     params:
