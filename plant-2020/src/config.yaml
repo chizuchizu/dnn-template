@@ -1,0 +1,104 @@
+datasets:
+  PLANT_2020:
+    name: &dataset_name "PLANT_2020"
+    type: *dataset_name
+    root: &root_dir "~/PycharmProjects/dnn-template/plant-2020"
+    splits:
+      dummy:
+        dataset_id: "dummy"
+        params:
+          asdf: True
+          csv_path: !join [ *root_dir, "/data/train.csv" ]
+        random_split:
+          lengths: [ 0.8, 0.2 ]
+          generator_seed: 42
+          sub_splits:
+            - dataset_id: &dataset_train !join [ *dataset_name, "/train" ]
+              transform_params:
+                - type: "Resize"
+                  params:
+                    size: [256, 256]
+                - &totensor
+                  type: "ToTensor"
+                  params:
+                - &normalize
+                  type: 'Normalize'
+                  params:
+                    mean: [ 0.49139968, 0.48215841, 0.44653091 ]
+                    std: [ 0.24703223, 0.24348513, 0.26158784 ]
+            - dataset_id: &dataset_val !join [ *dataset_name, "/val" ]
+              transform_params: &val_transform
+                - type: "Resize"
+                  params:
+                    size: [256, 256]
+                - *totensor
+                - *normalize
+
+models:
+  # model:
+  model:
+    name: "resnet50d"
+    repo_or_dir: "rwightman/pytorch-image-models"
+    params:
+      # in_channel: 3
+      num_classes: 4
+      pretrained: True
+
+    ckpt: "./run.ckpt"
+
+train:
+  seed: 42
+  log_freq: 100
+  start_epoch: 0
+  num_epochs: 10
+
+  train_folds: [ 0 ]
+
+
+
+
+  split:
+    type: "MultilabelStratifiedKFold"
+    params:
+      n_splits: 4
+      shuffle: True
+      random_state: 42
+
+  optimizer:
+    type: "Adam"
+    params:
+      lr: 0.05
+
+  criterion:
+    type: "GeneralizedCustomLoss"
+    org_term:
+      criterion:
+        type: "BCEFocalLoss"
+        params:
+          gamma: 2
+      factor: 1.0
+  model:
+    adaptations:
+    sequential: []
+    wrapper: 'DistributedDataParallel'
+    requires_grad: True
+    frozen_modules: []
+
+  train_data_loader:
+    dataset_id: *dataset_train
+    random_sample: True
+    batch_size: 32
+    num_workers: 4
+
+  val_data_loader:
+    dataset_id: *dataset_val
+    random_sample: False
+    batch_size: 32
+    num_workers: 4
+
+test:
+  test_data_loader:
+    dataset_id: *dataset_val
+    random_sample: False
+    batch_size: 32
+    num_workers: 4
