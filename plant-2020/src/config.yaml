@@ -17,7 +17,7 @@ datasets:
               transform_params:
                 - type: "Resize"
                   params:
-                    size: [256, 256]
+                    size: [ 224, 224 ]
                 - &totensor
                   type: "ToTensor"
                   params:
@@ -30,21 +30,19 @@ datasets:
               transform_params: &val_transform
                 - type: "Resize"
                   params:
-                    size: [256, 256]
+                    size: [ 224, 224 ]
                 - *totensor
                 - *normalize
 
 models:
-  # model:
   model:
-    name: "resnet50d"
-    repo_or_dir: "rwightman/pytorch-image-models"
+    name: "timm_model"
     params:
-      # in_channel: 3
+      timm_model_name: "tf_efficientnet_b0_ns"
       num_classes: 4
       pretrained: True
 
-    ckpt: "./run.ckpt"
+    ckpt: None
 
 train:
   seed: 42
@@ -57,22 +55,29 @@ train:
   optimizer:
     type: "Adam"
     params:
-      lr: 0.05
+      lr: 0.005
 
   criterion:
     type: "GeneralizedCustomLoss"
     org_term:
       criterion:
-        type: "BCEFocalLoss"
+        type: "BCEWithLogitsLoss"
         params:
-          gamma: 2
       factor: 1.0
-  model:
-    adaptations:
-    sequential: []
-    wrapper: 'DistributedDataParallel'
-    requires_grad: True
-    frozen_modules: []
+
+  scheduler:
+    type: "CosineAnnealingLR"
+    params:
+      T_max: 6
+      eta_min: 0
+      last_epoch: -1
+
+  #  model:
+  #    adaptations:
+  #    sequential: [ ]
+  #    wrapper: 'DistributedDataParallel'
+  #    requires_grad: True
+  #    frozen_modules: [ ]
 
   train_data_loader:
     dataset_id: *dataset_train
@@ -83,7 +88,7 @@ train:
   val_data_loader:
     dataset_id: *dataset_val
     random_sample: False
-    batch_size: 32
+    batch_size: 64
     num_workers: 4
 
 test:

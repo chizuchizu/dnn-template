@@ -4,6 +4,7 @@ import cv2
 import os
 import time
 
+import timm
 import torch
 from torch import distributed as dist
 from torch.backends import cudnn
@@ -22,7 +23,7 @@ from torchdistill.datasets.wrapper import BaseDatasetWrapper
 from torchdistill.eval.classification import compute_accuracy
 from torchdistill.misc.log import setup_log_file, SmoothedValue, MetricLogger
 from torchdistill.models.official import get_image_classification_model
-from torchdistill.models.registry import get_model
+from torchdistill.models.registry import get_model, register_model_func
 from torchdistill.losses.single import register_org_loss
 
 import pandas as pd
@@ -92,6 +93,12 @@ class PLANT_2020(torch.utils.data.Dataset):
         return image, label
 
 
+@register_model_func
+def timm_model(timm_model_name=None, num_classes=1, pretrained=False):
+    model = timm.create_model(timm_model_name, pretrained=pretrained, num_classes=num_classes)
+    return model
+
+
 def get_argparser():
     parser = argparse.ArgumentParser(description='Knowledge distillation for image classification models')
     parser.add_argument('--config', required=True, help='yaml file path')
@@ -130,14 +137,16 @@ def train_one_epoch(training_box, device, epoch, log_freq):
             metric_logger.log_every(training_box.train_data_loader, log_freq, header):
         start_time = time.time()
         sample_batch, targets = sample_batch.to(device), targets.to(device)
+        # print(supp_dict)
         loss = training_box(sample_batch, targets, supp_dict)
+
         training_box.update_params(loss)
         batch_size = sample_batch.shape[0]
         metric_logger.update(loss=loss.item(), lr=training_box.optimizer.param_groups[0]['lr'])
         metric_logger.meters['img/s'].update(batch_size / (time.time() - start_time))
         if (torch.isnan(loss) or torch.isinf(loss)) and is_main_process():
-            print(sample_batch.isnan().sum(), targets.isnan().sum(), supp_dict)
-            print(training_box.model_forward_proc(training_box.model, sample_batch, targets, supp_dict))
+            # print(sample_batch.isnan().sum(), targets.isnan().sum(), supp_dict)
+            # print(training_box.model_forward_proc(training_box.model, sample_batch, targets, supp_dict))
             raise ValueError('The training loop was broken due to loss = {}'.format(loss))
 
 
@@ -154,31 +163,38 @@ def evaluate(model, data_loader, device, device_ids, distributed, log_freq=1000,
 
     model.eval()
     metric_logger = MetricLogger(delimiter='  ')
+    batch_output = []
+    batch_target = []
     for image, target in metric_logger.log_every(data_loader, log_freq, header):
         image = image.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
         output = model(image)
+        batch_output.append(output)
+        batch_target.append(target)
         # acc1, acc5 = compute_accuracy(output, target, topk=(1, 5))
         # # FIXME need to take into account that the datasets
         # # could have been padded in distributed setup
         # batch_size = image.shape[0]
         # metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
         # metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
-        try:
-            auc = auroc(output, target.int(), num_classes=4, pos_label=1)
-            batch_size = image.shape[0]
-            metric_logger.meters["auc"].update(auc.item(), n=batch_size)
-        except ValueError:
-            pass
+        # try:
+        #     auc = auroc(output, target.int(), num_classes=4, pos_label=1)
+        #     batch_size = image.shape[0]
+        #     metric_logger.meters["auc"].update(auc.item(), n=batch_size)
+        # except ValueError:
+        #     pass
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
+    outputs = torch.cat(batch_output, dim=0)
+    targets = torch.cat(batch_target, dim=0)
+    auc = auroc(outputs, targets.int(), num_classes=4, pos_label=1)
     # top1_accuracy = metric_logger.acc1.global_avg
     # top5_accuracy = metric_logger.acc5.global_avg
     # logger.info(' * Acc@1 {:.4f}\tAcc@5 {:.4f}\n'.format(top1_accuracy, top5_accuracy))
-    auc = metric_logger.auc.global_avg
-    logger.info(' * AUC@1 {:.4f}\n'.format(auc))
-    return metric_logger.auc.global_avg
+    # auc = metric_logger.auc.global_avg
+    logger.info(' * AUC {:.4f}\n'.format(auc))
+    return auc
 
 
 def train(teacher_model, student_model, dataset_dict, ckpt_file_path, device, device_ids, distributed, config, args):
