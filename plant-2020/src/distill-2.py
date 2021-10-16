@@ -26,6 +26,7 @@ from torchdistill.models.official import get_image_classification_model
 from torchdistill.models.registry import get_model, register_model_func
 from torchdistill.losses.single import register_org_loss
 
+import numpy as np
 import pandas as pd
 from PIL import Image
 
@@ -33,6 +34,10 @@ logger = def_logger.getChild(__name__)
 
 
 def get_train_file_path(image_id):
+    return f"../data/images/{image_id}.jpg"
+
+
+def get_test_file_path(image_id):
     return f"../data/images/{image_id}.jpg"
 
 
@@ -60,19 +65,18 @@ class BCEFocalLoss(torch.nn.Module):
 
 @register_dataset
 class PLANT_2020(torch.utils.data.Dataset):
-    def __init__(self, asdf, csv_path, transform=None):
-        # super().__init__(transforms=transforms)
-        print(asdf, csv_path, transform)
-        train = pd.read_csv(csv_path)
-        self.transform = transform
-        train["path"] = train["image_id"].apply(get_train_file_path)
-        self.df = train
-        self.labels = train[["healthy", "multiple_diseases", "rust", "scab"]].values
-        # self.df = df
-        # self.cfg = cfg
-        # self.file_names = df['path'].values
-        # self.labels = df[cfg.base.target_col].values
-        # self.transform = transform
+    def __init__(self, inf, csv_path, transform=None, transform_params=None):
+        #
+        df = pd.read_csv(csv_path)
+        self.transform = util.build_transform(transform_params)
+        df["path"] = df["image_id"].apply(get_train_file_path)
+        self.df = df
+        if inf:
+            df["path"] = df["image_id"].apply(get_test_file_path)
+            self.labels = np.zeros(df.shape[0])
+        else:
+            df["path"] = df["image_id"].apply(get_train_file_path)
+            self.labels = df[["healthy", "multiple_diseases", "rust", "scab"]].values
 
     def __len__(self):
         return len(self.df)
@@ -171,30 +175,37 @@ def evaluate(model, data_loader, device, device_ids, distributed, log_freq=1000,
         output = model(image)
         batch_output.append(output)
         batch_target.append(target)
-        # acc1, acc5 = compute_accuracy(output, target, topk=(1, 5))
-        # # FIXME need to take into account that the datasets
-        # # could have been padded in distributed setup
-        # batch_size = image.shape[0]
-        # metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
-        # metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
-        # try:
-        #     auc = auroc(output, target.int(), num_classes=4, pos_label=1)
-        #     batch_size = image.shape[0]
-        #     metric_logger.meters["auc"].update(auc.item(), n=batch_size)
-        # except ValueError:
-        #     pass
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     outputs = torch.cat(batch_output, dim=0)
     targets = torch.cat(batch_target, dim=0)
     auc = auroc(outputs, targets.int(), num_classes=4, pos_label=1)
-    # top1_accuracy = metric_logger.acc1.global_avg
-    # top5_accuracy = metric_logger.acc5.global_avg
-    # logger.info(' * Acc@1 {:.4f}\tAcc@5 {:.4f}\n'.format(top1_accuracy, top5_accuracy))
-    # auc = metric_logger.auc.global_avg
+
     logger.info(' * AUC {:.4f}\n'.format(auc))
-    return auc
+    return auc, outputs
+
+
+@torch.no_grad()
+def inference(model, data_loader, device, device_ids, distributed, log_freq=1000, title=None, header="Test:"):
+    if distributed:
+        model = DistributedDataParallel(model, device_ids=device_ids)
+    elif device.type.startswith('cuda'):
+        model = DataParallel(model, device_ids=device_ids)
+    if title is not None:
+        logger.info(title)
+    model.eval()
+    batch_output = []
+    metric_logger = MetricLogger(delimiter='  ')
+
+    for image, _ in metric_logger.log_every(data_loader, log_freq, header):
+        image = image.to(device, non_blocking=True)
+        output = model(image)
+        batch_output.append(output)
+
+    outputs = torch.cat(batch_output, dim=0).cpu().numpy()
+
+    return outputs
 
 
 def train(teacher_model, student_model, dataset_dict, ckpt_file_path, device, device_ids, distributed, config, args):
@@ -216,8 +227,8 @@ def train(teacher_model, student_model, dataset_dict, ckpt_file_path, device, de
     for epoch in range(args.start_epoch, training_box.num_epochs):
         training_box.pre_process(epoch=epoch)
         train_one_epoch(training_box, device, epoch, log_freq)
-        val_top1_accuracy = evaluate(student_model, training_box.val_data_loader, device, device_ids, distributed,
-                                     log_freq=log_freq, header='Validation:')
+        val_top1_accuracy, _ = evaluate(student_model, training_box.val_data_loader, device, device_ids, distributed,
+                                        log_freq=log_freq, header='Validation:')
         if val_top1_accuracy > best_val_top1_accuracy and is_main_process():
             logger.info('Best top-1 AUC: {:.4f} -> {:.4f}'.format(best_val_top1_accuracy, val_top1_accuracy))
             logger.info('Updating ckpt at {}'.format(ckpt_file_path))
@@ -233,6 +244,15 @@ def train(teacher_model, student_model, dataset_dict, ckpt_file_path, device, de
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info('Training time {}'.format(total_time_str))
     training_box.clean_modules()
+
+
+def make_submission_file(predictions, inf_config):
+    logger.info("Start saving")
+
+    submission_file = pd.read_csv(inf_config["submission_file_path"])
+    submission_file[["healthy", "multiple_diseases", "rust", "scab"]] = predictions
+
+    submission_file.to_csv(inf_config["save_path"], index=False)
 
 
 def main(args):
@@ -261,15 +281,15 @@ def main(args):
             student_model.module if module_util.check_if_wrapped(student_model) else student_model
         load_ckpt(student_model_config['ckpt'], model=student_model_without_ddp, strict=True)
 
-    test_config = config['test']
-    test_data_loader_config = test_config['test_data_loader']
-    test_data_loader = util.build_data_loader(dataset_dict[test_data_loader_config['dataset_id']],
-                                              test_data_loader_config, distributed)
-    if not args.student_only and teacher_model is not None:
-        evaluate(teacher_model, test_data_loader, device, device_ids, distributed,
-                 title='[Teacher: {}]'.format(teacher_model_config['name']))
-    evaluate(student_model, test_data_loader, device, device_ids, distributed,
-             title='[Student: {}]'.format(student_model_config['name']))
+    inf_config = config['inf']
+    inf_data_loader_config = inf_config['inf_data_loader']
+    inf_data_loader = util.build_data_loader(dataset_dict[inf_data_loader_config['dataset_id']],
+                                             inf_data_loader_config, distributed)
+
+    inf_predictions = inference(student_model, inf_data_loader, device, device_ids, distributed,
+                                title='[Student: {}]'.format(student_model_config['name']))
+
+    make_submission_file(inf_predictions, inf_config)
 
 
 if __name__ == '__main__':

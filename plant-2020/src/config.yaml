@@ -7,7 +7,7 @@ datasets:
       dummy:
         dataset_id: "dummy"
         params:
-          asdf: True
+          inf: False
           csv_path: !join [ *root_dir, "/data/train.csv" ]
         random_split:
           lengths: [ 0.8, 0.2 ]
@@ -33,6 +33,12 @@ datasets:
                     size: [ 224, 224 ]
                 - *totensor
                 - *normalize
+      inf:
+        dataset_id: &dataset_inf !join [ *dataset_name, "/inf" ]
+        params:
+          inf: True
+          csv_path: !join [ *root_dir, "/data/test.csv" ]
+          transform_params: *val_transform
 
 models:
   model:
@@ -72,13 +78,6 @@ train:
       eta_min: 0
       last_epoch: -1
 
-  #  model:
-  #    adaptations:
-  #    sequential: [ ]
-  #    wrapper: 'DistributedDataParallel'
-  #    requires_grad: True
-  #    frozen_modules: [ ]
-
   train_data_loader:
     dataset_id: *dataset_train
     random_sample: True
@@ -97,3 +96,13 @@ test:
     random_sample: False
     batch_size: 32
     num_workers: 4
+
+inf:
+  inf_data_loader:
+    dataset_id: *dataset_inf
+    random_sample: False
+    batch_size: 32
+    num_workers: 4
+
+  submission_file_path: !join [ *root_dir, "/data/sample_submission.csv" ]
+  save_path: !join ["./resource/output/", *dataset_name, "/submission.csv"]
